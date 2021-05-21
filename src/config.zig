@@ -77,13 +77,13 @@ pub const connections_max = replicas_max + clients_max;
 
 /// The maximum size of a message in bytes:
 /// This is also the limit of all inflight data across multiple pipelined requests per connection.
-/// We may have one request of up to 4 MiB inflight or 4 pipelined requests of up to 1 MiB inflight.
+/// We may have one request of up to 2 MiB inflight or 2 pipelined requests of up to 1 MiB inflight.
 /// This impacts sequential disk write throughput, the larger the buffer the better.
-/// 4 MiB is 32,768 transfers, and a reasonable choice for sequential disk write throughput.
+/// 2 MiB is 16,384 transfers, and a reasonable choice for sequential disk write throughput.
 /// However, this impacts bufferbloat and head-of-line blocking latency for pipelined requests.
-/// For a 1 Gbps NIC = 125 MiB/s throughput: 4 MiB / 125 * 1000ms = 32ms for the next request.
-/// This also impacts the amount of memory allocated at initialization by the server.
-pub const message_size_max = 4 * 1024 * 1024;
+/// For a 1 Gbps NIC = 125 MiB/s throughput: 2 MiB / 125 * 1000ms = 16ms for the next request.
+/// This impacts the amount of memory allocated at initialization by the server.
+pub const message_size_max = 2 * 1024 * 1024;
 
 /// The number of full-sized messages allocated at initialization by the message bus.
 pub const message_bus_messages_max = connections_max * 4;
