@@ -5,7 +5,13 @@ pub const deployment_environment = .development;
 pub const log_level = 6;
 
 /// The maximum number of replicas allowed in a cluster.
-pub const replicas_max = 15;
+pub const replicas_max = 16;
+
+/// The maximum number of clients allowed per cluster, where each client has a unique 128-bit ID.
+/// This impacts the amount of memory allocated at initialization by the server.
+/// This determines the size of the VR client table used to cache replies to clients by client ID.
+/// Each client has one entry in the VR client table to store the latest `message_size_max` reply.
+pub const clients_max = 32;
 
 /// The minimum number of nodes required to form quorums for leader election or replication:
 /// Majority quorums are only required across leader election and replication phases (not within).
@@ -66,8 +72,8 @@ pub const journal_headers_max = switch (deployment_environment) {
     else => 16384,
 };
 
-/// The maximum number of connections that can be accepted and held open by the server at any time:
-pub const connections_max = 32;
+/// The maximum number of connections that can be held open by the server at any time:
+pub const connections_max = replicas_max + clients_max;
 
 /// The maximum size of a message in bytes:
 /// This is also the limit of all inflight data across multiple pipelined requests per connection.
