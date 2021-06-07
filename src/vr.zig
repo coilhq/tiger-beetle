@@ -200,7 +200,6 @@ pub const Header = packed struct {
 
     fn invalid_request(self: *const Header) ?[]const u8 {
         assert(self.command == .request);
-        if (self.nonce != 0) return "nonce != 0";
         if (self.client == 0) return "client == 0";
         if (self.cluster == 0) return "cluster == 0";
         if (self.view != 0) return "view != 0";
@@ -212,10 +211,13 @@ pub const Header = packed struct {
             .reserved => return "operation == .reserved",
             .init => return "operation == .init",
             .register => {
-                // The first `request` a client makes must be to register with the cluster:
+                // The first request a client makes must be to register with the cluster:
+                if (self.nonce != 0) return "nonce != 0";
                 if (self.request != 0) return "request != 0";
             },
             else => {
+                // Thereafter, the client must provide the session number in the nonce:
+                if (self.nonce == 0) return "nonce == 0";
                 if (self.request == 0) return "request == 0";
             },
         }
@@ -244,8 +246,10 @@ pub const Header = packed struct {
                 if (self.op == 0) return "op == 0";
                 if (self.op <= self.commit) return "op <= commit";
                 if (self.operation == .register) {
+                    // Client session numbers are replaced by the reference to the previous prepare.
                     if (self.request != 0) return "request != 0";
                 } else {
+                    // Client session numbers are replaced by the reference to the previous prepare.
                     if (self.request == 0) return "request == 0";
                 }
             },
