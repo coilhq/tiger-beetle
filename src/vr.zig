@@ -207,9 +207,18 @@ pub const Header = packed struct {
         if (self.op != 0) return "op != 0";
         if (self.commit != 0) return "commit != 0";
         if (self.offset != 0) return "offset != 0";
-        if (self.request == 0) return "request == 0";
         if (self.replica != 0) return "replica != 0";
-        if (self.operation == .reserved) return "operation == .reserved";
+        switch (self.operation) {
+            .reserved => return "operation == .reserved",
+            .init => return "operation == .init",
+            .register => {
+                // The first `request` a client makes must be to register with the cluster:
+                if (self.request != 0) return "request != 0";
+            },
+            else => {
+                if (self.request == 0) return "request == 0";
+            },
+        }
         return null;
     }
 
@@ -234,7 +243,11 @@ pub const Header = packed struct {
                 if (self.cluster == 0) return "cluster == 0";
                 if (self.op == 0) return "op == 0";
                 if (self.op <= self.commit) return "op <= commit";
-                if (self.request == 0) return "request == 0";
+                if (self.operation == .register) {
+                    if (self.request != 0) return "request != 0";
+                } else {
+                    if (self.request == 0) return "request == 0";
+                }
             },
         }
         return null;
@@ -260,7 +273,11 @@ pub const Header = packed struct {
                 if (self.client == 0) return "client == 0";
                 if (self.op == 0) return "op == 0";
                 if (self.op <= self.commit) return "op <= commit";
-                if (self.request == 0) return "request == 0";
+                if (self.operation == .register) {
+                    if (self.request != 0) return "request != 0";
+                } else {
+                    if (self.request == 0) return "request == 0";
+                }
             },
         }
         return null;
@@ -272,9 +289,15 @@ pub const Header = packed struct {
     pub fn peer_type(self: *const Header) enum { unknown, replica, client } {
         switch (self.command) {
             .reserved => unreachable,
-            // These messages cannot identify the peer as they may have been forwarded:
-            .request, .prepare => return .unknown,
+            // These messages cannot always identify the peer as they may be forwarded:
+            .request => switch (self.operation) {
+                // However, we do not forward the first .register request sent by a client:
+                .register => return .client,
+                else => return .unknown,
+            },
+            .prepare => return .unknown,
             // These messages identify the peer as either a replica or a client:
+            // TODO Assert that pong responses from a replica do not echo the pinging client's ID.
             .ping, .pong => {
                 if (self.client > 0) {
                     assert(self.replica == 0);
@@ -296,13 +319,6 @@ pub const Header = packed struct {
         return header;
     }
 };
-
-const Client = struct {};
-
-// TODO Client table should warn if the client's request number has wrapped past 32 bits.
-// This is easy to detect.
-// If a client has done a few billion requests, we don't expect to see request 0 come through.
-const ClientTable = struct {};
 
 pub const Timeout = struct {
     name: []const u8,
