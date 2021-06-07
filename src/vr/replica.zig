@@ -52,7 +52,7 @@ const ClientTableEntry = struct {
 pub const Replica = struct {
     allocator: *Allocator,
 
-    /// The id of the cluster to which this replica belongs:
+    /// The ID of the cluster to which this replica belongs:
     cluster: u128,
 
     /// The number of replicas in the cluster:
@@ -1571,7 +1571,7 @@ pub const Replica = struct {
 
         // TODO Add reply to the client table to answer future duplicate requests idempotently.
         // Lookup client table entry using client id.
-        // If client's last request id is <= this request id, then update client table entry.
+        // If client's last request ID is <= this request ID, then update client table entry.
         // Otherwise the client is already ahead of us, and we don't need to update the entry.
 
         if (self.leader_index(self.view) == self.replica) {
