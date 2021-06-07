@@ -472,36 +472,7 @@ pub const Replica = struct {
     /// view-number, m is the message it received from the client, n is the op-number it assigned to
     /// the request, and k is the commit-number.
     fn on_request(self: *Replica, message: *Message) void {
-        if (self.status != .normal) {
-            log.debug("{}: on_request: ignoring ({})", .{ self.replica, self.status });
-            return;
-        }
-
-        if (message.header.view > self.view) {
-            log.debug("{}: on_request: ignoring (newer view)", .{self.replica});
-            return;
-        }
-
-        if (self.follower()) {
-            // TODO Re-enable this dead branch when the Client starts pinging the cluster.
-            // Otherwise, we will trip our one-request-at-a-time limit.
-            if (message.header.view < self.view and false) {
-                log.debug("{}: on_request: forwarding (follower)", .{self.replica});
-                self.send_message_to_replica(self.leader_index(self.view), message);
-            } else {
-                // The message has the same view, but was routed to the wrong replica.
-                // Don't amplify traffic, let the client retry to another replica.
-                log.warn("{}: on_request: ignoring (follower)", .{self.replica});
-            }
-            return;
-        }
-
-        assert(self.status == .normal);
-        assert(self.leader());
-
-        // TODO Check the client table to see if this is a duplicate request and reply if so.
-        // TODO If request is pending then this will also reflect in client table and we can ignore.
-        // TODO Add client information to client table.
+        if (self.ignore_request_message(message)) return;
 
         if (self.request_checksum) |request_checksum| {
             assert(message.header.command == .request);
@@ -523,7 +494,6 @@ pub const Replica = struct {
         self.state_machine.prepare(message.header.operation.to_state_machine_op(StateMachine), body);
 
         var latest_entry = self.journal.entry_for_op_exact(self.op).?;
-
         message.header.nonce = latest_entry.checksum;
         message.header.view = self.view;
         message.header.op = self.op + 1;
@@ -1836,6 +1806,149 @@ pub const Replica = struct {
         }
 
         return false;
+    }
+
+    fn ignore_request_message(self: *Replica, message: *Message) bool {
+        assert(message.header.command == .request);
+
+        // We allow followers to reply to duplicate committed requests because we do not want to
+        // ignore or forward a client request if we know that we have the reply in our client table.
+        // We assume this is safe (even without regard to status below) since commits are immutable.
+        // This improves latency and reduces traffic.
+
+        // This may resend the reply if this is the latest request:
+        if (self.ignore_request_message_duplicate(message)) return true;
+
+        if (self.status != .normal) {
+            log.debug("{}: on_request: ignoring ({s})", .{ self.replica, self.status });
+            return true;
+        }
+
+        // This may forward the request to a newer leader:
+        if (self.ignore_request_message_follower(message)) return true;
+
+        return false;
+    }
+
+    /// Returns whether the request is stale or a duplicate of the latest committed request.
+    /// Resends the reply to the latest request if the request has been committed.
+    /// May be called by any replica in any status: `.normal`, `.view_change`, `.recovering`.
+    fn ignore_request_message_duplicate(self: *Replica, message: *Message) bool {
+        assert(message.header.command == .request);
+        assert(message.header.client > 0);
+
+        // The client stores the session number in the nonce of the header. This information is only
+        // available to the active leader. There is not enough space in the header to propagate this
+        // through the prepare as we repurpose the nonce to hash chain the previous prepare.
+        const session = message.header.nonce;
+        const request = message.header.request;
+
+        if (message.header.operation == .register) {
+            assert(session == 0);
+            assert(request == 0);
+        } else {
+            assert(session > 0);
+            assert(request > 0);
+        }
+
+        if (self.client_table.getEntry(message.header.client)) |entry| {
+            // If we are going to drop duplicate requests or resend the latest committed reply,
+            // then be sure that we do so for the same client and for the correct request.
+            // There is alot at stake.
+            assert(entry.value.reply.header.command == .reply);
+            assert(message.header.client == entry.key);
+            assert(message.header.client == entry.value.reply.header.client);
+
+            if (session < entry.value.session) {
+                // TODO Send eviction message to client.
+                // We may be behind the cluster, but the client is definitely behind us.
+                log.debug("{}: on_request: stale session", .{self.replica});
+                return true;
+            } else if (session > entry.value.session) {
+                // The session number is committed information. At first glance, it might seem that
+                // we may assert that the client's session is not newer than ours because the leader
+                // always has all committed information. However, this function may be called by any
+                // replica (leader or follower) in any status, so that we may not actually have all
+                // committed information, and the client may well be ahead of us.
+                // In other words, this function is an optimization:
+                // Reply if we have the committed reply for this request, otherwise do nothing.
+                return false;
+            }
+
+            assert(session == entry.value.session);
+
+            if (request < entry.value.reply.header.request) {
+                // Do nothing further with this request (e.g. do not forward to the leader).
+                log.debug("{}: on_request: stale request", .{self.replica});
+                return true;
+            } else if (request == entry.value.reply.header.request) {
+                assert(message.header.operation == entry.value.reply.header.operation);
+
+                log.debug("{}: on_request: resending reply", .{self.replica});
+                self.message_bus.send_message_to_client(message.header.client, entry.value.reply);
+                return true;
+            } else {
+                // The client is ahead of us or about to make the next request.
+                return false;
+            }
+        } else if (message.header.operation == .register) {
+            // We always create a newer session for the client (if we are the leader).
+            return false;
+        } else {
+            // Be sure that we have all commits to know whether or not the session has been evicted:
+            // Otherwise we may send an eviction message for a session that is yet to be registered.
+            if (self.status == .normal and self.leader()) {
+                // TODO Send eviction message to client.
+                log.debug("{}: on_request: no session", .{self.replica});
+                return true;
+            } else {
+                return false;
+            }
+        }
+    }
+
+    /// Returns whether the replica is eligible to process this request as the leader.
+    /// Takes the client's perspective into account if the client is aware of a newer view.
+    /// Forwards requests to the leader if the client has an older view.
+    fn ignore_request_message_follower(self: *Replica, message: *Message) bool {
+        assert(message.header.command == .request);
+
+        // The client is aware of a newer view:
+        // Even if we think we are the leader, we may be partitioned from the rest of the cluster.
+        // We therefore drop the message rather than flood our partition with traffic.
+        if (message.header.view > self.view) {
+            log.debug("{}: on_request: ignoring (newer view)", .{self.replica});
+            return true;
+        } else if (self.leader()) {
+            return false;
+        }
+
+        if (message.header.operation == .register) {
+            // We do not forward `.register` requests for the sake of `Header.peer_type()`.
+            // This enables the MessageBus to identify client connections on the first message.
+            log.debug("{}: on_request: ignoring (follower, register)", .{self.replica});
+        } else if (message.header.view < self.view) {
+            // The client may not know who the leader is, or may be retrying after a leader failure.
+            // We forward to the new leader ahead of any client retry timeout to reduce latency.
+            // Since the client is already connected to all replicas, the client will receive the
+            // reply from the new leader directly.
+            log.debug("{}: on_request: forwarding (follower)", .{self.replica});
+            self.send_message_to_replica(self.leader_index(self.view), message);
+        } else {
+            assert(message.header.view == self.view);
+            // The client has the correct view, but has retried against a follower.
+            // This may mean that the leader is down and that we are about to do a view change.
+            // There is also not much we can do as the client already knows who the leader is.
+            // We do not forward as this would amplify traffic on the network.
+
+            // TODO This may also indicate a client-leader partition. If we see enough of these,
+            // should we trigger a view change to select a leader that clients can reach?
+            // This is a question of weighing the probability of a partition vs routing error.
+            log.debug("{}: on_request: ignoring (follower, same view)", .{self.replica});
+        }
+
+        assert(self.follower());
+        return true;
     }
 
     fn ignore_view_change_message(self: *Replica, message: *const Message) bool {
