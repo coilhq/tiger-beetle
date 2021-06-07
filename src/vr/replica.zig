@@ -23,6 +23,32 @@ pub const Status = enum {
     recovering,
 };
 
+const ClientTable = std.AutoHashMap(u128, ClientTableEntry);
+
+/// We found two bugs in the VRR paper relating to the client table:
+///
+/// 1. a correctness bug, where successive client crashes may cause request numbers to collide for
+/// different request payloads, resulting in requests receiving the wrong reply, and
+///
+/// 2. a liveness bug, where if the client table is updated for `.request` and `.prepare` messages
+/// with the client's latest request number, then the client may be locked out from the cluster if
+/// the request is ever reordered through a view change.
+///
+/// We therefore take a different approach with the implementation of our client table, to:
+///
+/// 1. register client sessions explicitly through the state machine to ensure that client session
+/// numbers always increase, and
+///
+/// 2. make a more careful distinction between uncommitted and committed request numbers,
+/// considering that uncommitted requests may not survive a view change.
+const ClientTableEntry = struct {
+    /// The client's session number as committed to the cluster by a .register request.
+    session: u64,
+
+    /// The reply sent to the client's latest committed request.
+    reply: *Message,
+};
+
 pub const Replica = struct {
     allocator: *Allocator,
 
@@ -51,6 +77,9 @@ pub const Replica = struct {
 
     /// For executing service up-calls after an operation has been committed:
     state_machine: *StateMachine,
+
+    /// The client table records for each client the latest session and the latest committed reply.
+    client_table: ClientTable,
 
     /// The current view, initially 0:
     view: u64,
@@ -172,6 +201,10 @@ pub const Replica = struct {
         assert(replica < replica_count);
         assert(f > 0 or replica_count <= 2);
 
+        var client_table = ClientTable.init(allocator);
+        errdefer client_table.deinit();
+        try client_table.ensureCapacity(@intCast(u32, config.clients_max));
+
         var prepare_ok = try allocator.alloc(?*Message, replica_count);
         errdefer allocator.free(prepare_ok);
         std.mem.set(?*Message, prepare_ok, null);
@@ -227,6 +260,7 @@ pub const Replica = struct {
             .journal = journal,
             .message_bus = message_bus,
             .state_machine = state_machine,
+            .client_table = client_table,
             .view = init_prepare.view,
             .op = init_prepare.op,
             .commit_min = init_prepare.commit,
@@ -292,6 +326,7 @@ pub const Replica = struct {
     }
 
     pub fn deinit(self: *Replica) void {
+        self.client_table.deinit();
         self.allocator.free(self.prepare_ok_from_all_replicas);
         self.allocator.free(self.start_view_change_from_other_replicas);
         self.allocator.free(self.do_view_change_from_all_replicas);
