@@ -109,8 +109,8 @@ pub const StateMachine = struct {
         // Guard against the wall clock going backwards by taking the max with timestamps issued:
         self.prepare_timestamp = std.math.max(
             // The cluster `commit_timestamp` may be ahead of our `prepare_timestamp` because this
-            // may be our first prepare as a newly elected leader:
-            std.math.max(self.prepare_timestamp, self.commit_timestamp),
+            // may be our first prepare as a recently elected leader:
+            std.math.max(self.prepare_timestamp, self.commit_timestamp) + 1,
             @intCast(u64, std.time.nanoTimestamp()),
         );
         assert(self.prepare_timestamp > self.commit_timestamp);
