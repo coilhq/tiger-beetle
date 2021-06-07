@@ -90,14 +90,22 @@ pub const Header = packed struct {
     /// This adds an additional cryptographic safety control beyond VR's op and commit numbers.
     nonce: u128 = 0,
 
-    /// Each client records its own client id and a current request number. A client is allowed to
-    /// have just one outstanding request at a time.
-    client: u128 = 0,
-
-    /// The cluster id binds intention into the header, so that a client or replica can indicate
+    /// The cluster ID binds intention into the header, so that a client or replica can indicate
     /// which cluster it thinks it's speaking to, instead of accidentally talking to the wrong
     /// cluster (for example, staging vs production).
     cluster: u128,
+
+    /// Each client records its own client ID and a current request number. A client is allowed to
+    /// have just one outstanding request at a time.
+    client: u128 = 0,
+
+    /// Each request is given a number by the client and later requests must have larger numbers
+    /// than earlier ones. The request number is used by the replicas to avoid running requests more
+    /// than once; it is also used by the client to discard duplicate responses to its requests.
+    request: u32 = 0,
+
+    /// The cluster reconfiguration epoch number (for future use):
+    epoch: u32 = 0,
 
     /// Every message sent from one replica to another contains the sending replica's current view:
     view: u64 = 0,
@@ -116,14 +124,6 @@ pub const Header = packed struct {
     /// The size of this message header and any associated body:
     /// This must be 0 for an empty header with command == .reserved.
     size: u32 = @sizeOf(Header),
-
-    /// The cluster reconfiguration epoch number (for future use):
-    epoch: u32 = 0,
-
-    /// Each request is given a number by the client and later requests must have larger numbers
-    /// than earlier ones. The request number is used by the replicas to avoid running requests more
-    /// than once; it is also used by the client to discard duplicate responses to its requests.
-    request: u32 = 0,
 
     /// The index of the replica in the cluster configuration array that originated this message:
     /// This only identifies the ultimate author because messages may be forwarded amongst replicas.
