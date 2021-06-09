@@ -1850,20 +1850,18 @@ pub const Replica = struct {
             assert(request > 0);
         }
 
-        if (self.client_table.getEntry(message.header.client)) |entry| {
+        if (self.client_table.getPtr(message.header.client)) |entry| {
             // If we are going to drop duplicate requests or resend the latest committed reply,
-            // then be sure that we do so for the same client and for the correct request.
-            // There is always alot at stake.
-            assert(entry.value.reply.header.command == .reply);
-            assert(message.header.client == entry.key);
-            assert(message.header.client == entry.value.reply.header.client);
+            // then be sure that we do so for the correct request. There is alot at stake.
+            assert(entry.reply.header.command == .reply);
+            assert(message.header.client == entry.reply.header.client);
 
-            if (session < entry.value.session) {
+            if (session < entry.session) {
                 // TODO Send eviction message to client.
                 // We may be behind the cluster, but the client is definitely behind us.
                 log.debug("{}: on_request: stale session", .{self.replica});
                 return true;
-            } else if (session > entry.value.session) {
+            } else if (session > entry.session) {
                 // The session number is committed information. At first glance, it might seem that
                 // we may assert that the client's session is not newer than ours because the leader
                 // always has all committed information. However, this function may be called by any
@@ -1874,17 +1872,17 @@ pub const Replica = struct {
                 return false;
             }
 
-            assert(session == entry.value.session);
+            assert(session == entry.session);
 
-            if (request < entry.value.reply.header.request) {
+            if (request < entry.reply.header.request) {
                 // Do nothing further with this request (e.g. do not forward to the leader).
                 log.debug("{}: on_request: stale request", .{self.replica});
                 return true;
-            } else if (request == entry.value.reply.header.request) {
-                assert(message.header.operation == entry.value.reply.header.operation);
+            } else if (request == entry.reply.header.request) {
+                assert(message.header.operation == entry.reply.header.operation);
 
                 log.debug("{}: on_request: resending reply", .{self.replica});
-                self.message_bus.send_message_to_client(message.header.client, entry.value.reply);
+                self.message_bus.send_message_to_client(message.header.client, entry.reply);
                 return true;
             } else {
                 // The client is ahead of us or about to make the next request.
