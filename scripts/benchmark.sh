@@ -25,13 +25,10 @@ function onerror {
 }
 trap onerror EXIT
 
-CLUSTER_ID="--cluster-id=0a5ca1ab1ebee11e"
-REPLICA_ADDRESSES="--replica-addresses=3001"
-
 for I in 0
 do
     echo "Starting replica $I..."
-    ./tigerbeetle $CLUSTER_ID $REPLICA_ADDRESSES --replica-index=$I > benchmark.log 2>&1 &
+    ./tigerbeetle --cluster=1 --addresses=3001 --replica=$I > benchmark.log 2>&1 &
 done
 
 # Wait for replicas to start, listen and connect:

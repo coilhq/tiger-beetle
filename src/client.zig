@@ -40,8 +40,8 @@ pub const Client = struct {
 
     allocator: *mem.Allocator,
     id: u128,
-    cluster: u128,
-    replica_count: u16,
+    cluster: u32,
+    replica_count: u8,
     message_bus: *MessageBus,
 
     // TODO Track the latest view number received in .pong and .reply messages.
@@ -57,11 +57,10 @@ pub const Client = struct {
 
     pub fn init(
         allocator: *mem.Allocator,
-        cluster: u128,
-        replica_count: u16,
+        cluster: u32,
+        replica_count: u8,
         message_bus: *MessageBus,
     ) !Client {
-        assert(cluster > 0);
         assert(replica_count > 0);
 
         // We require the client ID to be non-zero for client requests.
@@ -77,13 +76,13 @@ pub const Client = struct {
             .message_bus = message_bus,
             .request_timeout = .{
                 .name = "request_timeout",
-                .replica = std.math.maxInt(u16),
-                .after = 100,
+                .replica = std.math.maxInt(u8),
+                .after = 10,
             },
             .ping_timeout = .{
                 .name = "ping_timeout",
-                .replica = std.math.maxInt(u16),
-                .after = 100,
+                .replica = std.math.maxInt(u8),
+                .after = 10,
             },
         };
 
@@ -304,14 +303,14 @@ pub const Client = struct {
     }
 
     fn send_message_to_replicas(self: *Client, message: *Message) void {
-        var replica: u16 = 0;
+        var replica: u8 = 0;
         while (replica < self.replica_count) : (replica += 1) {
             self.message_bus.send_message_to_replica(replica, message);
         }
     }
 
     fn send_header_to_replicas(self: *Client, header: Header) void {
-        var replica: u16 = 0;
+        var replica: u8 = 0;
         while (replica < self.replica_count) : (replica += 1) {
             self.message_bus.send_header_to_replica(replica, header);
         }
