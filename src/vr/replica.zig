@@ -52,17 +52,17 @@ const ClientTableEntry = struct {
 pub const Replica = struct {
     allocator: *Allocator,
 
-    /// The ID of the cluster to which this replica belongs:
-    cluster: u128,
+    /// The number of the cluster to which this replica belongs:
+    cluster: u32,
 
     /// The number of replicas in the cluster:
-    replica_count: u16,
+    replica_count: u8,
 
     /// The index of this replica's address in the configuration array held by the MessageBus:
-    replica: u16,
+    replica: u8,
 
     /// The maximum number of replicas that may be faulty:
-    f: u16,
+    f: u8,
 
     /// A distributed fault-tolerant clock to provide lower/upper bounds on the leader's wall clock:
     clock: Clock,
@@ -82,7 +82,7 @@ pub const Replica = struct {
     client_table: ClientTable,
 
     /// The current view, initially 0:
-    view: u64,
+    view: u32,
 
     /// Whether we have experienced a view jump:
     /// If this is true then we must request a start_view message from the leader before committing.
@@ -183,9 +183,9 @@ pub const Replica = struct {
 
     pub fn init(
         allocator: *Allocator,
-        cluster: u128,
-        replica_count: u16,
-        replica: u16,
+        cluster: u32,
+        replica_count: u8,
+        replica: u8,
         time: *Time,
         // TODO We should actually provide Storage here, a Replica will always use the same Journal:
         journal: *Journal,
@@ -195,7 +195,6 @@ pub const Replica = struct {
         // The smallest f such that 2f + 1 is less than or equal to the number of replicas.
         const f = (replica_count - 1) / 2;
 
-        assert(cluster > 0);
         assert(replica_count > 0);
         assert(replica_count > f);
         assert(replica < replica_count);
@@ -347,8 +346,8 @@ pub const Replica = struct {
     }
 
     /// Returns the index into the configuration of the leader for a given view.
-    pub fn leader_index(self: *Replica, view: u64) u16 {
-        return @intCast(u16, @mod(view, self.replica_count));
+    pub fn leader_index(self: *Replica, view: u32) u8 {
+        return @intCast(u8, @mod(view, self.replica_count));
     }
 
     /// Time is measured in logical ticks that are incremented on every call to tick().
@@ -1213,11 +1212,11 @@ pub const Replica = struct {
         assert(message.header.view == self.view);
 
         // The list of remote replicas yet to send a prepare_ok:
-        var waiting: [32]u16 = undefined;
+        var waiting: [32]u8 = undefined;
         var waiting_len: usize = 0;
         for (self.prepare_ok_from_all_replicas) |received, replica| {
             if (received == null and replica != self.replica) {
-                waiting[waiting_len] = @intCast(u16, replica);
+                waiting[waiting_len] = @intCast(u8, replica);
                 waiting_len += 1;
                 if (waiting_len == waiting.len) break;
             }
@@ -1408,7 +1407,7 @@ pub const Replica = struct {
     /// The choice of replica is a deterministic function of:
     /// 1. `choose_any_other_replica_ticks`, and
     /// 2. whether the replica is connected and ready for sending in the MessageBus.
-    fn choose_any_other_replica(self: *Replica) ?u16 {
+    fn choose_any_other_replica(self: *Replica) ?u8 {
         var count: usize = 0;
         while (count < self.replica_count) : (count += 1) {
             self.choose_any_other_replica_ticks += 1;
@@ -1418,7 +1417,7 @@ pub const Replica = struct {
             );
             if (replica == self.replica) continue;
             // TODO if (!MessageBus.can_send_to_replica(replica)) continue;
-            return @intCast(u16, replica);
+            return @intCast(u8, replica);
         }
         return null;
     }
@@ -1490,6 +1489,7 @@ pub const Replica = struct {
     fn commit_op(self: *Replica, prepare: *const Message) void {
         assert(self.status == .normal or self.status == .view_change);
         assert(prepare.header.command == .prepare);
+        assert(prepare.header.operation != .init);
         assert(prepare.header.op == self.commit_min + 1);
         assert(prepare.header.op <= self.op);
 
@@ -1856,7 +1856,11 @@ pub const Replica = struct {
             assert(entry.reply.header.command == .reply);
             assert(message.header.client == entry.reply.header.client);
 
-            if (session < entry.session) {
+            if (session == 0) {
+                assert(message.header.operation == .register);
+                log.debug("{}: on_request: duplicate or stale .register request", .{self.replica});
+                // Use the request number below to determine whether to resend the reply.
+            } else if (session < entry.session) {
                 // TODO Send eviction message to client.
                 // We may be behind the cluster, but the client is definitely behind us.
                 log.debug("{}: on_request: stale session", .{self.replica});
@@ -1872,8 +1876,6 @@ pub const Replica = struct {
                 return false;
             }
 
-            assert(session == entry.session);
-
             if (request < entry.reply.header.request) {
                 // Do nothing further with this request (e.g. do not forward to the leader).
                 log.debug("{}: on_request: stale request", .{self.replica});
@@ -1881,11 +1883,15 @@ pub const Replica = struct {
             } else if (request == entry.reply.header.request) {
                 assert(message.header.operation == entry.reply.header.operation);
 
-                log.debug("{}: on_request: resending reply", .{self.replica});
+                log.debug("{}: on_request: resending reply to duplicate request", .{self.replica});
                 self.message_bus.send_message_to_client(message.header.client, entry.reply);
                 return true;
             } else {
                 // The client is ahead of us or about to make the next request.
+                // TODO There is an optimization here where if we are the leader we could detect
+                // that we have been partitioned from the cluster and drop the message instead of
+                // flooding the network with prepares that will never be acked.
+                // For example, if we are the leader and we see
                 return false;
             }
         } else if (message.header.operation == .register) {
@@ -1896,9 +1902,16 @@ pub const Replica = struct {
             // Otherwise we may send an eviction message for a session that is yet to be registered.
             if (self.status == .normal and self.leader()) {
                 // TODO Send eviction message to client.
+                // There is still the risk of sending an eviction message if we as the leader have
+                // been partitioned, simply don't know about a session and the client talks to us.
+                // We can ameliorate this risk by having clients include the view number and
+                // rejecting messages from clients with newer views.
                 log.debug("{}: on_request: no session", .{self.replica});
                 return true;
             } else {
+                // If this message will ever be queued anywhere, then be sure that this function is
+                // evaluated again after the replica enters normal status, otherwise we may execute
+                // the same request twice.
                 return false;
             }
         }
@@ -2583,7 +2596,7 @@ pub const Replica = struct {
             return;
         }
 
-        const next = @mod(self.replica + 1, @intCast(u16, self.replica_count));
+        const next = @mod(self.replica + 1, @intCast(u8, self.replica_count));
         if (next == self.leader_index(message.header.view)) {
             log.debug("{}: replicate: not replicating (completed)", .{self.replica});
             return;
@@ -2724,7 +2737,7 @@ pub const Replica = struct {
         }
     }
 
-    fn send_prepare_to_replica(self: *Replica, replica: u16, op: u64, checksum: ?u128) void {
+    fn send_prepare_to_replica(self: *Replica, replica: u8, op: u64, checksum: ?u128) void {
         assert(self.status == .normal or self.status == .view_change);
         assert(replica != self.replica);
 
@@ -2784,7 +2797,7 @@ pub const Replica = struct {
     }
 
     fn send_header_to_other_replicas(self: *Replica, header: Header) void {
-        var replica: u16 = 0;
+        var replica: u8 = 0;
         while (replica < self.replica_count) : (replica += 1) {
             if (replica != self.replica) {
                 self.send_header_to_replica(replica, header);
@@ -2793,7 +2806,7 @@ pub const Replica = struct {
     }
 
     // TODO Work out the maximum number of messages a replica may output per tick() or on_message().
-    fn send_header_to_replica(self: *Replica, replica: u16, header: Header) void {
+    fn send_header_to_replica(self: *Replica, replica: u8, header: Header) void {
         log.debug("{}: sending {s} to replica {}: {}", .{
             self.replica,
             @tagName(header.command),
@@ -2807,7 +2820,7 @@ pub const Replica = struct {
     }
 
     fn send_message_to_other_replicas(self: *Replica, message: *Message) void {
-        var replica: u16 = 0;
+        var replica: u8 = 0;
         while (replica < self.replica_count) : (replica += 1) {
             if (replica != self.replica) {
                 self.send_message_to_replica(replica, message);
@@ -2815,7 +2828,7 @@ pub const Replica = struct {
         }
     }
 
-    fn send_message_to_replica(self: *Replica, replica: u16, message: *Message) void {
+    fn send_message_to_replica(self: *Replica, replica: u8, message: *Message) void {
         log.debug("{}: sending {s} to replica {}: {}", .{
             self.replica,
             @tagName(message.header.command),
@@ -2969,7 +2982,7 @@ pub const Replica = struct {
         self.send_message_to_other_replicas(start_view);
     }
 
-    fn transition_to_normal_status(self: *Replica, new_view: u64) void {
+    fn transition_to_normal_status(self: *Replica, new_view: u32) void {
         log.debug("{}: transition_to_normal_status: view={}", .{ self.replica, new_view });
         // In the VRR paper it's possible to transition from .normal to .normal for the same view.
         // For example, this could happen after a state transfer triggered by an op jump.
@@ -3012,7 +3025,7 @@ pub const Replica = struct {
     /// where v identifies the new view. A replica notices the need for a view change either based
     /// on its own timer, or because it receives a start_view_change or do_view_change message for
     /// a view with a larger number than its own view.
-    fn transition_to_view_change_status(self: *Replica, new_view: u64) void {
+    fn transition_to_view_change_status(self: *Replica, new_view: u32) void {
         log.debug("{}: transition_to_view_change_status: view={}", .{ self.replica, new_view });
         assert(new_view > self.view);
         self.view = new_view;

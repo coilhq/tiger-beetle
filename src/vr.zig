@@ -5,13 +5,16 @@ const log = std.log.scoped(.vr);
 
 const config = @import("config.zig");
 
+/// The version of our Viewstamped Replication protocol in use, including customizations.
+/// For backwards compatibility through breaking changes (e.g. upgrading checksums/ciphers).
+pub const Version: u8 = 0;
+
 pub const Replica = @import("vr/replica.zig").Replica;
 pub const Clock = @import("vr/clock.zig").Clock;
 pub const DeterministicTime = @import("vr/clock.zig").DeterministicTime;
 pub const SystemTime = @import("vr/clock.zig").SystemTime;
 pub const Journal = @import("vr/journal.zig").Journal;
 
-// TODO Command for client to fetch its latest request number from the cluster.
 /// Viewstamped Replication protocol commands:
 pub const Command = packed enum(u8) {
     reserved,
@@ -39,13 +42,16 @@ pub const Command = packed enum(u8) {
 /// This type exists to avoid making the Header type dependant on the state
 /// machine used, which would cause awkward circular type dependencies.
 pub const Operation = enum(u8) {
-    /// The value 0 is required to be .reserved regardless of the state machine in order to
-    /// avoid interpretation of a suprious 0 byte as a valid operation.
+    /// Operations reserved by the VR protocol (for all state machines):
+    ///
+    /// The value 0 is reserved to prevent a spurious zero from being interpreted as an operation.
     reserved = 0,
-    /// The value 1 is required to be .init and is used for initialization of the cluster.
+    /// The value 1 is reserved to initialize the cluster.
     init = 1,
-    /// All other values are treated the same by the VR protocol and are free for the state
-    /// machine to use as it sees fit.
+    /// The value 2 is reserved to register a client session with the cluster.
+    register = 2,
+
+    /// Operations exported by the state machine (all other values are free):
     _,
 
     pub fn to_state_machine_op(op: Operation, comptime StateMachine: type) StateMachine.Operation {
@@ -70,70 +76,97 @@ pub const Operation = enum(u8) {
 /// Network message and journal entry header:
 /// We reuse the same header for both so that prepare messages from the leader can simply be
 /// journalled as is by the followers without requiring any further modification.
+/// TODO Move from packed struct to extern struct for C ABI:
 pub const Header = packed struct {
     comptime {
         assert(@sizeOf(Header) == 128);
     }
-    /// A checksum covering only the rest of this header (but including checksum_body):
-    /// This enables the header to be trusted without having to recv() or read() associated body.
+    /// A checksum covering only the remainder of this header, starting from `checksum_body`.
+    /// This allows the header to be trusted without having to recv() or read() the associated body.
     /// This checksum is enough to uniquely identify a network message or journal entry.
     checksum: u128 = 0,
 
-    /// A checksum covering only associated body.
+    /// A checksum covering only the associated body after this header.
     checksum_body: u128 = 0,
 
-    /// The checksum of the message to which this message refers, or a unique recovery nonce:
-    /// We use this nonce in various ways, for example:
-    /// * A prepare sets nonce to the checksum of the prior prepare to create a hash chain.
-    /// * A prepare_ok sets nonce to the checksum of the prepare it wants to ack.
-    /// * A commit sets nonce to the checksum of the latest committed op.
-    /// This adds an additional cryptographic safety control beyond VR's op and commit numbers.
-    nonce: u128 = 0,
+    /// A backpointer to the checksum of the previous prepare if this header is for a prepare.
+    head: u128 = 0,
 
-    /// The cluster ID binds intention into the header, so that a client or replica can indicate
-    /// which cluster it thinks it's speaking to, instead of accidentally talking to the wrong
-    /// cluster (for example, staging vs production).
-    cluster: u128,
-
-    /// Each client records its own client ID and a current request number. A client is allowed to
-    /// have just one outstanding request at a time.
+    /// Each client process generates a unique, random and ephemeral client ID at initialization.
+    /// The client ID identifies connections made by the client to the cluster for the sake of
+    /// routing messages back to the client.
+    ///
+    /// With the client ID in hand, the client then registers a monotonically increasing session
+    /// number (committed through the cluster) to allow the client's session to be evicted safely
+    /// from the client table if too many concurrent clients cause the client table to overflow.
+    /// The monotonically increasing session number prevents duplicate client requests from being
+    /// replayed.
+    ///
+    /// The problem of routing is therefore solved by the 128-bit client ID, and the problem of
+    /// detecting whether a session has been evicted is solved by the session number.
     client: u128 = 0,
+
+    /// The checksum of the message to which this message refers, or a unique recovery nonce.
+    ///
+    /// We use this nonce in various ways, for example:
+    ///
+    /// * A `request` sets this to the client's session number.
+    /// * A `prepare` sets this to the checksum of the client's request.
+    /// * A `prepare_ok` sets this to the checksum of the prepare being acked.
+    /// * A `reply` sets this to that of the `prepare` for end-to-end integrity at the client.
+    /// * A `commit` sets this to the checksum of the latest committed prepare.
+    /// * A `request_prepare` sets this to the checksum of the prepare being requested.
+    /// * A `nack_prepare` sets this to the checksum of the prepare being nacked.
+    ///
+    /// This allows for cryptographic guarantees beyond request, op, and commit numbers, which have
+    /// low entropy and may otherwise collide in the event of any correctness bugs.
+    nonce: u128 = 0,
 
     /// Each request is given a number by the client and later requests must have larger numbers
     /// than earlier ones. The request number is used by the replicas to avoid running requests more
     /// than once; it is also used by the client to discard duplicate responses to its requests.
+    /// A client is allowed to have at most one request inflight at a time.
     request: u32 = 0,
 
-    /// The cluster reconfiguration epoch number (for future use):
+    /// The cluster number binds intention into the header, so that a client or replica can indicate
+    /// the cluster it believes it is speaking to, instead of accidentally talking to the wrong
+    /// cluster (for example, staging vs production).
+    cluster: u32,
+
+    /// The cluster reconfiguration epoch number (for future use).
     epoch: u32 = 0,
 
-    /// Every message sent from one replica to another contains the sending replica's current view:
-    view: u64 = 0,
+    /// Every message sent from one replica to another contains the sending replica's current view.
+    /// A `u32` allows for a minimum lifetime of 136 years at a rate of one view change per second.
+    view: u32 = 0,
 
-    /// The op number:
+    /// The op number of the latest prepare that may or may not yet be committed. Uncommitted ops
+    /// may be replaced by different ops if they do not survive through a view change.
     op: u64 = 0,
 
-    /// The commit number:
+    /// The commit number of the latest committed prepare. Committed ops are immutable.
     commit: u64 = 0,
 
-    /// The journal offset to which this message relates:
-    /// This enables direct access to a prepare, without requiring previous variable-length entries.
-    /// While we use fixed-size data structures, a batch will contain a variable amount of them.
+    /// The journal offset to which this message relates. This enables direct access to a prepare in
+    /// storage, without yet having any previous prepares. All prepares are of variable size, since
+    /// a prepare may contain any number of data structures (even if these are of fixed size).
     offset: u64 = 0,
 
-    /// The size of this message header and any associated body:
-    /// This must be 0 for an empty header with command == .reserved.
+    /// The size of the Header structure (always), plus any associated body.
     size: u32 = @sizeOf(Header),
 
-    /// The index of the replica in the cluster configuration array that originated this message:
-    /// This only identifies the ultimate author because messages may be forwarded amongst replicas.
-    replica: u16 = 0,
+    /// The index of the replica in the cluster configuration array that authored this message.
+    /// This identifies only the ultimate author because messages may be forwarded amongst replicas.
+    replica: u8 = 0,
 
-    /// The VR protocol command for this message:
+    /// The Viewstamped Replication protocol command for this message.
     command: Command,
 
-    /// The state machine operation to apply:
+    /// The state machine operation to apply.
     operation: Operation = .reserved,
+
+    /// The version of the protocol implementation that originated this message.
+    version: u8 = Version,
 
     pub fn calculate_checksum(self: *const Header) u128 {
         const checksum_size = @sizeOf(@TypeOf(self.checksum));
@@ -172,6 +205,7 @@ pub const Header = packed struct {
     /// Returns null if all fields are set correctly according to the command, or else a warning.
     /// This does not verify that checksum is valid, and expects that this has already been done.
     pub fn invalid(self: *const Header) ?[]const u8 {
+        if (self.version != Version) return "version != Version";
         if (self.size < @sizeOf(Header)) return "size < @sizeOf(Header)";
         if (self.epoch != 0) return "epoch != 0";
         return switch (self.command) {
@@ -185,14 +219,15 @@ pub const Header = packed struct {
 
     fn invalid_reserved(self: *const Header) ?[]const u8 {
         assert(self.command == .reserved);
-        if (self.nonce != 0) return "nonce != 0";
+        if (self.head != 0) return "head != 0";
         if (self.client != 0) return "client != 0";
+        if (self.nonce != 0) return "nonce != 0";
+        if (self.request != 0) return "request != 0";
         if (self.cluster != 0) return "cluster != 0";
         if (self.view != 0) return "view != 0";
         if (self.op != 0) return "op != 0";
         if (self.commit != 0) return "commit != 0";
         if (self.offset != 0) return "offset != 0";
-        if (self.request != 0) return "request != 0";
         if (self.replica != 0) return "replica != 0";
         if (self.operation != .reserved) return "operation != .reserved";
         return null;
@@ -200,9 +235,8 @@ pub const Header = packed struct {
 
     fn invalid_request(self: *const Header) ?[]const u8 {
         assert(self.command == .request);
+        if (self.head != 0) return "head != 0";
         if (self.client == 0) return "client == 0";
-        if (self.cluster == 0) return "cluster == 0";
-        if (self.view != 0) return "view != 0";
         if (self.op != 0) return "op != 0";
         if (self.commit != 0) return "commit != 0";
         if (self.offset != 0) return "offset != 0";
@@ -229,20 +263,19 @@ pub const Header = packed struct {
         switch (self.operation) {
             .reserved => return "operation == .reserved",
             .init => {
-                if (self.nonce != 0) return "init: nonce != 0";
+                if (self.head != 0) return "init: head != 0";
                 if (self.client != 0) return "init: client != 0";
-                if (self.cluster == 0) return "init: cluster == 0";
+                if (self.nonce != 0) return "init: nonce != 0";
+                if (self.request != 0) return "init: request != 0";
                 if (self.view != 0) return "init: view != 0";
                 if (self.op != 0) return "init: op != 0";
                 if (self.commit != 0) return "init: commit != 0";
                 if (self.offset != 0) return "init: offset != 0";
                 if (self.size != @sizeOf(Header)) return "init: size != @sizeOf(Header)";
-                if (self.request != 0) return "init: request != 0";
                 if (self.replica != 0) return "init: replica != 0";
             },
             else => {
                 if (self.client == 0) return "client == 0";
-                if (self.cluster == 0) return "cluster == 0";
                 if (self.op == 0) return "op == 0";
                 if (self.op <= self.commit) return "op <= commit";
                 if (self.operation == .register) {
@@ -260,17 +293,17 @@ pub const Header = packed struct {
     fn invalid_prepare_ok(self: *const Header) ?[]const u8 {
         assert(self.command == .prepare_ok);
         if (self.size != @sizeOf(Header)) return "size != @sizeOf(Header)";
-        if (self.cluster == 0) return "cluster == 0";
         switch (self.operation) {
             .reserved => return "operation == .reserved",
             .init => {
-                if (self.nonce != 0) return "init: nonce != 0";
+                if (self.head != 0) return "init: head != 0";
                 if (self.client != 0) return "init: client != 0";
+                if (self.nonce != 0) return "init: nonce != 0";
+                if (self.request != 0) return "init: request != 0";
                 if (self.view != 0) return "init: view != 0";
                 if (self.op != 0) return "init: op != 0";
                 if (self.commit != 0) return "init: commit != 0";
                 if (self.offset != 0) return "init: offset != 0";
-                if (self.request != 0) return "init: request != 0";
                 if (self.replica != 0) return "init: replica != 0";
             },
             else => {
@@ -327,7 +360,7 @@ pub const Header = packed struct {
 pub const Timeout = struct {
     name: []const u8,
     /// TODO: get rid of this field as this is used by Client as well
-    replica: u16,
+    replica: u8,
     after: u64,
     ticks: u64 = 0,
     ticking: bool = false,

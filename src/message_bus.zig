@@ -31,7 +31,7 @@ fn MessageBusImpl(comptime process_type: ProcessType) type {
         pool: MessagePool,
         io: *IO,
 
-        cluster: u128,
+        cluster: u32,
         configuration: []std.net.Address,
 
         /// The Replica or Client process that will receive messages from this Self.
@@ -76,10 +76,10 @@ fn MessageBusImpl(comptime process_type: ProcessType) type {
         /// Initialize the Self for the given cluster, configuration and replica/client process.
         pub fn init(
             allocator: *mem.Allocator,
-            cluster: u128,
+            cluster: u32,
             configuration: []std.net.Address,
             process: switch (process_type) {
-                .replica => u16,
+                .replica => u8,
                 .client => u128,
             },
             io: *IO,
@@ -195,7 +195,7 @@ fn MessageBusImpl(comptime process_type: ProcessType) type {
                     // Each replica is responsible for connecting to replicas that come
                     // after it in the configuration. This ensures that replicas never try
                     // to connect to each other at the same time.
-                    var replica: u16 = self.process.replica.replica + 1;
+                    var replica: u8 = self.process.replica.replica + 1;
                     while (replica < self.replicas.len) : (replica += 1) {
                         self.maybe_connect_to_replica(replica);
                     }
@@ -210,7 +210,7 @@ fn MessageBusImpl(comptime process_type: ProcessType) type {
                 },
                 .client => {
                     // The client connects to all replicas.
-                    var replica: u16 = 0;
+                    var replica: u8 = 0;
                     while (replica < self.replicas.len) : (replica += 1) {
                         self.maybe_connect_to_replica(replica);
                     }
@@ -218,7 +218,7 @@ fn MessageBusImpl(comptime process_type: ProcessType) type {
             }
         }
 
-        fn maybe_connect_to_replica(self: *Self, replica: u16) void {
+        fn maybe_connect_to_replica(self: *Self, replica: u8) void {
             // We already have a connection to the given replica.
             if (self.replicas[replica] != null) {
                 assert(self.connections_used > 0);
@@ -321,7 +321,7 @@ fn MessageBusImpl(comptime process_type: ProcessType) type {
         }
 
         /// Returns true if the target replica is connected and has space in its send queue.
-        pub fn can_send_to_replica(self: *Self, replica: u16) bool {
+        pub fn can_send_to_replica(self: *Self, replica: u8) bool {
             if (process_type == .replica and replica == self.process.replica.replica) {
                 return !self.process.send_queue.full();
             } else {
@@ -330,7 +330,7 @@ fn MessageBusImpl(comptime process_type: ProcessType) type {
             }
         }
 
-        pub fn send_header_to_replica(self: *Self, replica: u16, header: Header) void {
+        pub fn send_header_to_replica(self: *Self, replica: u8, header: Header) void {
             assert(header.size == @sizeOf(Header));
 
             if (!self.can_send_to_replica(replica)) {
@@ -354,7 +354,7 @@ fn MessageBusImpl(comptime process_type: ProcessType) type {
             self.send_message_to_replica(replica, message);
         }
 
-        pub fn send_message_to_replica(self: *Self, replica: u16, message: *Message) void {
+        pub fn send_message_to_replica(self: *Self, replica: u8, message: *Message) void {
             // Messages sent by a process to itself are delivered directly in flush():
             if (process_type == .replica and replica == self.process.replica.replica) {
                 self.process.send_queue.push(message.ref()) catch |err| switch (err) {
@@ -469,7 +469,7 @@ fn MessageBusImpl(comptime process_type: ProcessType) type {
                 /// The peer is a client with the given id.
                 client: u128,
                 /// The peer is a replica with the given id.
-                replica: u16,
+                replica: u8,
             } = .none,
             state: enum {
                 /// The connection is not in use, with peer set to `.none`.
@@ -521,7 +521,7 @@ fn MessageBusImpl(comptime process_type: ProcessType) type {
             /// Attempt to connect to a replica.
             /// The slot in the Message.replicas slices is immediately reserved.
             /// Failure is silent and returns the connection to an unused state.
-            pub fn connect_to_replica(self: *Connection, bus: *Self, replica: u16) void {
+            pub fn connect_to_replica(self: *Connection, bus: *Self, replica: u8) void {
                 if (process_type == .replica) assert(replica != bus.process.replica.replica);
 
                 assert(self.peer == .none);

@@ -9,28 +9,6 @@ const HashMapTransfers = std.AutoHashMap(u128, Transfer);
 const HashMapCommits = std.AutoHashMap(u128, Commit);
 
 pub const StateMachine = struct {
-
-    pub const Operation = packed enum(u8) {
-        /// Operations reserved by our Viewstamped Replication protocol:
-        ///
-        /// Reserved to prevent an accidental zero byte from being interpreted as an operation.
-        reserved,
-        /// Init the journal hash chain with a universally unique per-cluster entry.
-        init,
-        /// Register an ephemeral client with the cluster for linearizability within a session.
-        register,
-
-        /// Operations supported by TigerBeetle:
-        create_accounts,
-        create_transfers,
-        commit_transfers,
-        lookup_accounts,
-
-        pub fn jsonStringify(self: Command, options: StringifyOptions, writer: anytype) !void {
-            try std.fmt.format(writer, "\"{}\"", .{@tagName(self)});
-        }
-    };
-
     allocator: *std.mem.Allocator,
     prepare_timestamp: u64,
     commit_timestamp: u64,
@@ -134,7 +112,8 @@ pub const StateMachine = struct {
         output: []u8,
     ) usize {
         return switch (operation) {
-            .init => 0,
+            .init => unreachable,
+            .register => 0,
             .create_accounts => self.execute(.create_accounts, input, output),
             .create_transfers => self.execute(.create_transfers, input, output),
             .commit_transfers => self.execute(.commit_transfers, input, output),

@@ -23,10 +23,10 @@ pub const clients_max = 32;
 pub const quorum_leader_election = -1;
 pub const quorum_replication = 2;
 
-/// The default server port to listen on if not specified in `--replica-addresses`:
+/// The default server port to listen on if not specified in `--addresses`:
 pub const port = 3001;
 
-/// The default network interface address to listen on if not specified in `--replica-addresses`:
+/// The default network interface address to listen on if not specified in `--addresses`:
 /// WARNING: Binding to all interfaces with "0.0.0.0" is dangerous and opens the server to anyone.
 /// Bind to the "127.0.0.1" loopback address to accept local connections as a safe default only.
 pub const address = "127.0.0.1";

@@ -47,7 +47,7 @@ pub fn main() !void {
     var replica = try Replica.init(
         arena,
         args.cluster,
-        @intCast(u16, args.configuration.len),
+        @intCast(u8, args.configuration.len),
         args.replica,
         &time,
         &journal,

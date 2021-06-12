@@ -49,11 +49,11 @@ pub const MessageBus = struct {
     }
 
     /// Returns true if the target replica is connected and has space in its send queue.
-    pub fn can_send_to_replica(self: *MessageBus, replica: u16) bool {
+    pub fn can_send_to_replica(self: *MessageBus, replica: u8) bool {
         return !self.send_queues[replica].full();
     }
 
-    pub fn send_header_to_replica(self: *MessageBus, replica: u16, header: Header) void {
+    pub fn send_header_to_replica(self: *MessageBus, replica: u8, header: Header) void {
         assert(header.size == @sizeOf(Header));
 
         if (!self.can_send_to_replica(replica)) {
@@ -77,7 +77,7 @@ pub const MessageBus = struct {
         self.send_message_to_replica(replica, message);
     }
 
-    pub fn send_message_to_replica(self: *MessageBus, replica: u16, message: *Message) void {
+    pub fn send_message_to_replica(self: *MessageBus, replica: u8, message: *Message) void {
         self.send_queues[replica].push(message.ref()) catch |err| switch (err) {
             error.NoSpaceLeft => {
                 self.unref(message);

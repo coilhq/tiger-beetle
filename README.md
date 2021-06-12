@@ -75,9 +75,9 @@ scripts/benchmark.sh
 Launch a TigerBeetle cluster on your local machine by running each of these commands in a new terminal tab:
 
 ```
-./tigerbeetle --cluster-id=0a5ca1ab1ebee11e --replica-addresses=3001,3002,3003 --replica-index=0
-./tigerbeetle --cluster-id=0a5ca1ab1ebee11e --replica-addresses=3001,3002,3003 --replica-index=1
-./tigerbeetle --cluster-id=0a5ca1ab1ebee11e --replica-addresses=3001,3002,3003 --replica-index=2
+./tigerbeetle --cluster=1 --addresses=3001,3002,3003 --replica=0
+./tigerbeetle --cluster=1 --addresses=3001,3002,3003 --replica=1
+./tigerbeetle --cluster=1 --addresses=3001,3002,3003 --replica=2
 ```
 
 Run the TigerBeetle binary to see all command line arguments:

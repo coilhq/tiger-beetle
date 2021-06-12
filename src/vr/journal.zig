@@ -18,7 +18,7 @@ const Range = @import("../concurrent_ranges.zig").Range;
 pub const Journal = struct {
     allocator: *Allocator,
     storage: *Storage,
-    replica: u16,
+    replica: u8,
     size: u64,
     size_headers: u64,
     size_circular_buffer: u64,
@@ -53,7 +53,7 @@ pub const Journal = struct {
     pub fn init(
         allocator: *Allocator,
         storage: *Storage,
-        replica: u16,
+        replica: u8,
         size: u64,
         headers_count: u32,
     ) !Journal {

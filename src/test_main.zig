@@ -19,7 +19,7 @@ pub fn run() !void {
     var allocator = &arena.allocator;
 
     const f = 1;
-    const cluster = 123456789;
+    const cluster = 0;
 
     var configuration: [3]*Replica = undefined;
     var message_bus = try MessageBus.init(allocator, &configuration);
@@ -31,7 +31,7 @@ pub fn run() !void {
         journal.* = try Journal.init(
             allocator,
             &storage[index],
-            @intCast(u16, index),
+            @intCast(u8, index),
             config.journal_size_max,
             config.journal_headers_max,
         );
@@ -53,7 +53,7 @@ pub fn run() !void {
             allocator,
             cluster,
             &configuration,
-            @intCast(u16, index),
+            @intCast(u8, index),
             f,
             &journals[index],
             &message_bus,

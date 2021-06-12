@@ -14,7 +14,7 @@ pub fn connect(port: u16) !std.os.fd_t {
 
 // TODO We can share most of what follows with `src/benchmark.zig`:
 
-pub const cluster_id: u128 = 746649394563965214; // a5ca1ab1ebee11e
+pub const cluster_id: u32 = 0;
 pub const client_id: u128 = 123;
 pub var request_number: u32 = 0;
 var sent_ping = false;
