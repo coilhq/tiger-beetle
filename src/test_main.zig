@@ -6,7 +6,7 @@ const MessageBus = @import("test_message_bus.zig").MessageBus;
 const vr = @import("vr.zig");
 const Replica = vr.Replica;
 const Journal = vr.Journal;
-const Storage = vr.Storage;
+const Storage = @import("storage.zig").Storage;
 const StateMachine = @import("state_machine.zig").StateMachine;
 
 const log = std.log.default;
@@ -52,9 +52,8 @@ pub fn run() !void {
         replica.* = try Replica.init(
             allocator,
             cluster,
-            &configuration,
+            @intCast(u8, configuration.len),
             @intCast(u8, index),
-            f,
             &journals[index],
             &message_bus,
             &state_machines[index],
