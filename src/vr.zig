@@ -81,7 +81,7 @@ pub const Header = packed struct {
     comptime {
         assert(@sizeOf(Header) == 128);
     }
-    /// A checksum covering only the remainder of this header, starting from `checksum_body`.
+    /// A checksum covering only the remainder of this header.
     /// This allows the header to be trusted without having to recv() or read() the associated body.
     /// This checksum is enough to uniquely identify a network message or journal entry.
     checksum: u128 = 0,
@@ -89,8 +89,14 @@ pub const Header = packed struct {
     /// A checksum covering only the associated body after this header.
     checksum_body: u128 = 0,
 
-    /// A backpointer to the checksum of the previous prepare if this header is for a prepare.
-    head: u128 = 0,
+    /// A backpointer to the previous request or prepare checksum for hash chain verification.
+    /// This provides a cryptographic guarantee for linearizability:
+    /// 1. across a client's requests, and
+    /// 2. across the distributed log of prepares.
+    /// This may also be used as the initialization vector for AEAD encryption at rest, provided
+    /// that the leader ratchets the encryption key every view change to ensure that prepares
+    /// reordered through a view change never repeat the same IV for the same encryption key.
+    parent: u128 = 0,
 
     /// Each client process generates a unique, random and ephemeral client ID at initialization.
     /// The client ID identifies connections made by the client to the cluster for the sake of
@@ -108,7 +114,7 @@ pub const Header = packed struct {
 
     /// The checksum of the message to which this message refers, or a unique recovery nonce.
     ///
-    /// We use this nonce in various ways, for example:
+    /// We use this cryptographic context in various ways, for example:
     ///
     /// * A `request` sets this to the client's session number.
     /// * A `prepare` sets this to the checksum of the client's request.
@@ -120,7 +126,7 @@ pub const Header = packed struct {
     ///
     /// This allows for cryptographic guarantees beyond request, op, and commit numbers, which have
     /// low entropy and may otherwise collide in the event of any correctness bugs.
-    nonce: u128 = 0,
+    context: u128 = 0,
 
     /// Each request is given a number by the client and later requests must have larger numbers
     /// than earlier ones. The request number is used by the replicas to avoid running requests more
@@ -219,9 +225,9 @@ pub const Header = packed struct {
 
     fn invalid_reserved(self: *const Header) ?[]const u8 {
         assert(self.command == .reserved);
-        if (self.head != 0) return "head != 0";
+        if (self.parent != 0) return "parent != 0";
         if (self.client != 0) return "client != 0";
-        if (self.nonce != 0) return "nonce != 0";
+        if (self.context != 0) return "context != 0";
         if (self.request != 0) return "request != 0";
         if (self.cluster != 0) return "cluster != 0";
         if (self.view != 0) return "view != 0";
@@ -235,7 +241,7 @@ pub const Header = packed struct {
 
     fn invalid_request(self: *const Header) ?[]const u8 {
         assert(self.command == .request);
-        if (self.head != 0) return "head != 0";
+        if (self.parent != 0) return "parent != 0";
         if (self.client == 0) return "client == 0";
         if (self.op != 0) return "op != 0";
         if (self.commit != 0) return "commit != 0";
@@ -246,12 +252,12 @@ pub const Header = packed struct {
             .init => return "operation == .init",
             .register => {
                 // The first request a client makes must be to register with the cluster:
-                if (self.nonce != 0) return "nonce != 0";
+                if (self.context != 0) return "context != 0";
                 if (self.request != 0) return "request != 0";
             },
             else => {
-                // Thereafter, the client must provide the session number in the nonce:
-                if (self.nonce == 0) return "nonce == 0";
+                // Thereafter, the client must provide the session number in the context:
+                if (self.context == 0) return "context == 0";
                 if (self.request == 0) return "request == 0";
             },
         }
@@ -263,9 +269,9 @@ pub const Header = packed struct {
         switch (self.operation) {
             .reserved => return "operation == .reserved",
             .init => {
-                if (self.head != 0) return "init: head != 0";
+                if (self.parent != 0) return "init: parent != 0";
                 if (self.client != 0) return "init: client != 0";
-                if (self.nonce != 0) return "init: nonce != 0";
+                if (self.context != 0) return "init: context != 0";
                 if (self.request != 0) return "init: request != 0";
                 if (self.view != 0) return "init: view != 0";
                 if (self.op != 0) return "init: op != 0";
@@ -296,9 +302,9 @@ pub const Header = packed struct {
         switch (self.operation) {
             .reserved => return "operation == .reserved",
             .init => {
-                if (self.head != 0) return "init: head != 0";
+                if (self.parent != 0) return "init: parent != 0";
                 if (self.client != 0) return "init: client != 0";
-                if (self.nonce != 0) return "init: nonce != 0";
+                if (self.context != 0) return "init: context != 0";
                 if (self.request != 0) return "init: request != 0";
                 if (self.view != 0) return "init: view != 0";
                 if (self.op != 0) return "init: op != 0";

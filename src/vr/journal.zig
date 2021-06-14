@@ -296,7 +296,7 @@ pub const Journal = struct {
                     // A exists and B exists:
                     if (range) |*r| {
                         assert(b.op == r.op_min);
-                        if (a.checksum == b.nonce) {
+                        if (a.checksum == b.parent) {
                             // A is connected to B, but B is disconnected, add A to range:
                             assert(a.view <= b.view);
                             r.op_min = a.op;
@@ -310,7 +310,7 @@ pub const Journal = struct {
                             // Op numbers in the same view must be connected.
                             unreachable;
                         }
-                    } else if (a.checksum == b.nonce) {
+                    } else if (a.checksum == b.parent) {
                         // A is connected to B, and B is connected or B is op_max.
                         assert(a.view <= b.view);
                     } else if (a.view < b.view) {
@@ -558,7 +558,7 @@ pub const Journal = struct {
             }
             if (self.previous_entry(header)) |previous| {
                 assert(previous.command == .prepare);
-                if (previous.checksum != header.nonce) {
+                if (previous.checksum != header.parent) {
                     log.debug("{}: journal: write_headers_once: no hash chain", .{
                         self.replica,
                     });
