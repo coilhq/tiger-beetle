@@ -9,11 +9,18 @@ const HashMapTransfers = std.AutoHashMap(u128, Transfer);
 const HashMapCommits = std.AutoHashMap(u128, Commit);
 
 pub const StateMachine = struct {
-    pub const Operation = packed enum(u8) {
-        // We reserve command "0" to detect an accidental zero byte being interpreted as an operation:
-        reserved,
-        init,
 
+    pub const Operation = packed enum(u8) {
+        /// Operations reserved by our Viewstamped Replication protocol:
+        ///
+        /// Reserved to prevent an accidental zero byte from being interpreted as an operation.
+        reserved,
+        /// Init the journal hash chain with a universally unique per-cluster entry.
+        init,
+        /// Register an ephemeral client with the cluster for linearizability within a session.
+        register,
+
+        /// Operations supported by TigerBeetle:
         create_accounts,
         create_transfers,
         commit_transfers,
