@@ -8,6 +8,23 @@ const HashMapAccounts = std.AutoHashMap(u128, Account);
 const HashMapTransfers = std.AutoHashMap(u128, Transfer);
 const HashMapCommits = std.AutoHashMap(u128, Commit);
 
+pub const Operation = enum(u8) {
+    /// Operations reserved by VR protocol (for all state machines):
+    reserved,
+    init,
+    register,
+
+    /// Operations exported by TigerBeetle:
+    create_accounts,
+    create_transfers,
+    commit_transfers,
+    lookup_accounts,
+
+    pub fn jsonStringify(self: Command, options: StringifyOptions, writer: anytype) !void {
+        try std.fmt.format(writer, "\"{}\"", .{@tagName(self)});
+    }
+};
+
 pub const StateMachine = struct {
     allocator: *std.mem.Allocator,
     prepare_timestamp: u64,

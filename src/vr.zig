@@ -42,8 +42,7 @@ pub const Command = packed enum(u8) {
 /// This type exists to avoid making the Header type dependant on the state
 /// machine used, which would cause awkward circular type dependencies.
 pub const Operation = enum(u8) {
-    /// Operations reserved by the VR protocol (for all state machines):
-    ///
+    /// Operations reserved by VR protocol (for all state machines):
     /// The value 0 is reserved to prevent a spurious zero from being interpreted as an operation.
     reserved = 0,
     /// The value 1 is reserved to initialize the cluster.
@@ -59,16 +58,22 @@ pub const Operation = enum(u8) {
         return @intToEnum(StateMachine.Operation, @enumToInt(op));
     }
 
-    pub fn from_state_machine_op(comptime StateMachine: type, op: StateMachine.Operation) Operation {
+    pub fn from_state_machine_op(
+        comptime StateMachine: type,
+        op: StateMachine.Operation,
+    ) Operation {
         return @intToEnum(Operation, @enumToInt(op));
     }
 
     fn check_state_machine_op_type(comptime Op: type) void {
         if (!@hasField(Op, "reserved") or std.meta.fieldInfo(Op, .reserved).value != 0) {
-            @compileError("StateMachine.Operation must have a 'reserved' field with value 0!");
+            @compileError("StateMachine.Operation must have a 'reserved' field with value 0");
         }
         if (!@hasField(Op, "init") or std.meta.fieldInfo(Op, .init).value != 1) {
-            @compileError("StateMachine.Operation must have an 'init' field with value 1!");
+            @compileError("StateMachine.Operation must have an 'init' field with value 1");
+        }
+        if (!@hasField(Op, "register") or std.meta.fieldInfo(Op, .register).value != 2) {
+            @compileError("StateMachine.Operation must have a 'register' field with value 2");
         }
     }
 };
