@@ -13,9 +13,6 @@ const vr = @import("../vr.zig");
 const Header = vr.Header;
 const Replica = vr.Replica;
 
-const ConcurrentRanges = @import("../concurrent_ranges.zig").ConcurrentRanges;
-const Range = @import("../concurrent_ranges.zig").Range;
-
 pub const Journal = struct {
     pub const Read = struct {
         replica: *Replica,
@@ -32,13 +29,44 @@ pub const Journal = struct {
         pub const Trigger = enum { append, repair };
 
         replica: *Replica,
-        completion: Storage.Write,
         callback: fn (self: *Replica, wrote: ?*Message, trigger: Trigger) void,
 
         message: *Message,
         trigger: Trigger,
 
-        headers: []align(config.sector_size) u8,
+        /// This is reset to undefined and reused for each Storage.write_sectors() call.
+        range: Range,
+
+        const SectorBuffer = *align(config.sector_size) [config.sector_size]u8;
+        fn headers(write: *Journal.Write, journal: *Journal) SectorBuffer {
+            const i = (@ptrToInt(write) - @ptrToInt(&journal.writes.items)) / @sizeOf(Journal.Write);
+            // TODO: the compiler should probably be smart enough to avoid needing this align cast
+            // as the type of Journal.headers_iops ensures that each buffer is properly aligned.
+            return @alignCast(config.sector_size, &journal.headers_iops[i]);
+        }
+    };
+
+    /// State that needs to be persisted while waiting for an overlapping
+    /// concurrent write to complete.
+    const Range = struct {
+        completion: Storage.Write,
+        callback: fn (write: *Journal.Write) void,
+        buffer: []const u8,
+        offset: u64,
+
+        /// If other writes are waiting on this write to proceed, they will
+        /// be queued up in this linked list.
+        next: ?*Range = null,
+        /// True if a Storage.write_sectors() operation is in progress for this buffer/offset.
+        writing: bool,
+
+        fn overlaps(self: *const Range, other: *const Range) bool {
+            if (self.offset < other.offset) {
+                return self.offset + self.buffer.len > other.offset;
+            } else {
+                return other.offset + other.buffer.len > self.offset;
+            }
+        }
     };
 
     allocator: *Allocator,
@@ -68,17 +96,14 @@ pub const Journal = struct {
     /// A faulty bit is used then only to qualify the severity of the dirty bit.
     faulty: BitSet,
 
-    /// We copy-on-write to this buffer when writing, as in-memory headers may change concurrently:
-    write_headers_buffer: []align(config.sector_size) u8,
+    /// We copy-on-write to these buffers when writing, as in-memory headers may change concurrently.
+    /// The buffers belong to the IOP at the corresponding index in IOPS.
+    headers_iops: *align(config.sector_size) [config.io_depth_write][config.sector_size]u8,
 
     /// Apart from the header written with the entry, we also store two redundant copies of each
     /// header at different locations on disk, and we alternate between these for each append.
     /// This tracks which version (0 or 1) should be written to next:
-    write_headers_version: u1 = 0,
-
-    /// These serialize concurrent writes but only for overlapping ranges:
-    //writing_headers: ConcurrentRanges = .{ .name = "write_headers" },
-    //writing_sectors: ConcurrentRanges = .{ .name = "write_sectors" },
+    headers_version: u1 = 0,
 
     pub fn init(
         allocator: *Allocator,
@@ -110,14 +135,13 @@ pub const Journal = struct {
         var faulty = try BitSet.init(allocator, headers.len);
         errdefer faulty.deinit();
 
-        var write_headers_buffer = try allocator.allocAdvanced(
-            u8,
+        const headers_iops = (try allocator.allocAdvanced(
+            [config.sector_size]u8,
             config.sector_size,
-            @sizeOf(Header) * headers.len,
+            config.io_depth_write,
             .exact,
-        );
-        errdefer allocator.free(write_headers_buffer);
-        std.mem.set(u8, write_headers_buffer, 0);
+        ))[0..config.io_depth_write];
+        errdefer allocator.free(headers_iops);
 
         const header_copies = 2;
         const size_headers = headers.len * @sizeOf(Header);
@@ -145,14 +169,13 @@ pub const Journal = struct {
             .headers = headers,
             .dirty = dirty,
             .faulty = faulty,
-            .write_headers_buffer = write_headers_buffer,
+            .headers_iops = headers_iops,
         };
 
         assert(@mod(self.size_circular_buffer, config.sector_size) == 0);
         assert(@mod(@ptrToInt(&self.headers[0]), config.sector_size) == 0);
         assert(self.dirty.bits.len == self.headers.len);
         assert(self.faulty.bits.len == self.headers.len);
-        assert(self.write_headers_buffer.len == @sizeOf(Header) * self.headers.len);
 
         return self;
     }
@@ -612,23 +635,21 @@ pub const Journal = struct {
 
         write.* = .{
             .replica = replica,
-            .completion = undefined,
             .callback = callback,
             .message = message.ref(),
             .trigger = trigger,
-            .headers = undefined,
+            .range = undefined,
         };
 
-        self.storage.write_sectors(
+        self.write_sectors(
             write_prepare_on_write_message,
-            &write.completion,
+            write,
             message.buffer,
             self.offset_in_circular_buffer(message.header.offset),
         );
     }
 
-    fn write_prepare_on_write_message(completion: *Storage.Write) void {
-        const write = @fieldParentPtr(Journal.Write, "completion", completion);
+    fn write_prepare_on_write_message(write: *Journal.Write) void {
         const self = write.replica.journal;
         const message = write.message;
 
@@ -644,8 +665,7 @@ pub const Journal = struct {
         self.write_prepare_header(write);
     }
 
-    fn write_prepare_on_write_header(completion: *Storage.Write) void {
-        const write = @fieldParentPtr(Journal.Write, "completion", completion);
+    fn write_prepare_on_write_header(write: *Journal.Write) void {
         const self = write.replica.journal;
         const message = write.message;
 
@@ -708,11 +728,11 @@ pub const Journal = struct {
         //self.writing_headers.acquire(&range);
         //defer self.writing_headers.release(&range);
 
-        const source = std.mem.sliceAsBytes(self.headers)[offset..][0..config.sector_size];
-        write.headers = self.write_headers_buffer[offset..][0..config.sector_size];
-        assert(write.headers.len == source.len);
-        assert(write.headers.len == config.sector_size);
-        std.mem.copy(u8, write.headers, source);
+        std.mem.copy(
+            u8,
+            write.headers(self),
+            std.mem.sliceAsBytes(self.headers)[offset..][0..config.sector_size],
+        );
 
         log.debug("{}: journal: write_header: op={} sectors[{}..{}]", .{
             self.replica,
@@ -724,7 +744,7 @@ pub const Journal = struct {
         // TODO Snapshots
         if (self.write_prepare_header_once(message.header)) {
             const version = self.write_headers_increment_version();
-            self.write_prepare_header_to_version(write, write_prepare_on_write_header, version, write.headers, offset);
+            self.write_prepare_header_to_version(write, write_prepare_on_write_header, version, write.headers(self), offset);
         } else {
             // Versions must be incremented upfront:
             // If we don't increment upfront we could end up writing to the same copy twice.
@@ -732,8 +752,8 @@ pub const Journal = struct {
             const version = self.write_headers_increment_version();
             _ = self.write_headers_increment_version();
             switch (version) {
-                0 => self.write_prepare_header_to_version(write, write_prepare_on_write_header_version_0, 0, write.headers, offset),
-                1 => self.write_prepare_header_to_version(write, write_prepare_on_write_header_version_1, 1, write.headers, offset),
+                0 => self.write_prepare_header_to_version(write, write_prepare_on_write_header_version_0, 0, write.headers(self), offset),
+                1 => self.write_prepare_header_to_version(write, write_prepare_on_write_header_version_1, 1, write.headers(self), offset),
             }
         }
     }
@@ -743,25 +763,23 @@ pub const Journal = struct {
         return Journal.sector_floor(message.header.op * @sizeOf(Header));
     }
 
-    fn write_prepare_on_write_header_version_0(completion: *Storage.Write) void {
-        const write = @fieldParentPtr(Journal.Write, "completion", completion);
+    fn write_prepare_on_write_header_version_0(write: *Journal.Write) void {
         const self = write.replica.journal;
         const offset = write_prepare_header_offset(write.message);
         // Pass the opposite version bit from the one we just finished writing.
-        self.write_prepare_header_to_version(write, write_prepare_on_write_header, 1, write.headers, offset);
+        self.write_prepare_header_to_version(write, write_prepare_on_write_header, 1, write.headers(self), offset);
     }
 
-    fn write_prepare_on_write_header_version_1(completion: *Storage.Write) void {
-        const write = @fieldParentPtr(Journal.Write, "completion", completion);
+    fn write_prepare_on_write_header_version_1(write: *Journal.Write) void {
         const self = write.replica.journal;
         const offset = write_prepare_header_offset(write.message);
         // Pass the opposite version bit from the one we just finished writing.
-        self.write_prepare_header_to_version(write, write_prepare_on_write_header, 0, write.headers, offset);
+        self.write_prepare_header_to_version(write, write_prepare_on_write_header, 0, write.headers(self), offset);
     }
 
     fn write_headers_increment_version(self: *Journal) u1 {
-        self.write_headers_version +%= 1;
-        return self.write_headers_version;
+        self.headers_version +%= 1;
+        return self.headers_version;
     }
 
     /// Since we allow gaps in the journal, we may have to write our headers twice.
@@ -808,7 +826,7 @@ pub const Journal = struct {
     fn write_prepare_header_to_version(
         self: *Journal,
         write: *Journal.Write,
-        callback: fn (completion: *Storage.Write) void,
+        callback: fn (completion: *Journal.Write) void,
         version: u1,
         buffer: []const u8,
         offset: u64,
@@ -824,12 +842,81 @@ pub const Journal = struct {
         assert(@ptrToInt(buffer.ptr) < @ptrToInt(self.headers.ptr) or
             @ptrToInt(buffer.ptr) > @ptrToInt(self.headers.ptr) + self.size_headers);
 
-        self.storage.write_sectors(
+        self.write_sectors(
             callback,
-            &write.completion,
+            write,
             buffer,
             self.offset_in_headers_version(offset, version),
         );
+    }
+
+    fn write_sectors(
+        self: *Journal,
+        callback: fn (write: *Journal.Write) void,
+        write: *Journal.Write,
+        buffer: []const u8,
+        offset: u64,
+    ) void {
+        write.range = .{
+            .callback = callback,
+            .completion = undefined,
+            .buffer = buffer,
+            .offset = offset,
+            .writing = false,
+        };
+        self.queue_range(write);
+    }
+
+    /// Start the write on the current range or add it to the proper queue
+    /// if an overlapping range is currently being written.
+    fn queue_range(self: *Journal, write: *Journal.Write) void {
+        assert(!write.range.writing);
+        assert(write.range.next == null);
+
+        var it = self.writes.iterate();
+        while (it.next()) |other| {
+            if (other == write) continue;
+            if (!other.range.writing) continue;
+
+            if (other.range.overlaps(&write.range)) {
+                write.range.next = other.range.next;
+                other.range.next = &write.range;
+                return;
+            }
+        }
+
+        write.range.writing = true;
+        self.storage.write_sectors(
+            write_sectors_on_write,
+            &write.range.completion,
+            write.range.buffer,
+            write.range.offset,
+        );
+    }
+
+    fn write_sectors_on_write(completion: *Storage.Write) void {
+        const range = @fieldParentPtr(Range, "completion", completion);
+        const write = @fieldParentPtr(Journal.Write, "range", range);
+        const self = write.replica.journal;
+
+        assert(write.range.writing);
+        write.range.writing = false;
+
+        // Drain the list of ranges that were waiting on this range to complete.
+        while (range.next) |waiting| {
+            assert(waiting.writing == false);
+            range.next = waiting.next;
+            waiting.next = null;
+
+            self.queue_range(@fieldParentPtr(Journal.Write, "range", waiting));
+            assert(range.next == waiting.next);
+        }
+        assert(range.next == null);
+
+        // The callback may set range, so we can't set range to undefined after running the callback.
+        const callback = range.callback;
+        range.* = undefined;
+        callback(write);
     }
 
     pub fn sector_floor(offset: u64) u64 {
@@ -902,7 +989,8 @@ pub fn IOPS(comptime T: type, comptime size: u6) type {
 
         pub fn acquire(self: *Self) ?*T {
             const i = @ctz(Map, self.free);
-            if (i >= @bitSizeOf(Map)) return null;
+            assert(i <= @bitSizeOf(Map));
+            if (i == @bitSizeOf(Map)) return null;
             self.free &= ~(@as(Map, 1) << @intCast(MapLog2, i));
             return &self.items[i];
         }
@@ -922,6 +1010,26 @@ pub fn IOPS(comptime T: type, comptime size: u6) type {
         /// Returns true if there is at least one IOP in use
         pub fn executing(self: *const Self) std.math.Log2IntCeil(Map) {
             return @popCount(Map, std.math.maxInt(Map)) - @popCount(Map, self.free);
+        }
+
+        pub const Iterator = struct {
+            iops: *Self,
+            /// On iteration start this is a copy of the free map, but
+            /// inverted so we can use @ctz() to find occupied instead of free slots.
+            unseen: Map,
+
+            pub fn next(iterator: *Iterator) ?*T {
+                const i = @ctz(Map, iterator.unseen);
+                assert(i <= @bitSizeOf(Map));
+                if (i == @bitSizeOf(Map)) return null;
+                // Set this bit of unseen to 1 to indicate this slot has been seen.
+                iterator.unseen &= ~(@as(Map, 1) << @intCast(MapLog2, i));
+                return &iterator.iops.items[i];
+            }
+        };
+
+        pub fn iterate(self: *Self) Iterator {
+            return .{ .iops = self, .unseen = ~self.free };
         }
     };
 }
